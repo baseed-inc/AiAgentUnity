@@ -1,36 +1,37 @@
 using System;
+using System.Buffers;
+using System.Collections.Concurrent;
+using System.Threading.Tasks;
 using UnityEngine;
 
 public class StreamingTTSPlayer : MonoBehaviour
 {
     const int SampleRate = 24000;
     const int Channels = 1;
-
-    [Header("Latency (ms)")]
-    [SerializeField] int prefillMs = 200;
-    [SerializeField] int lowWaterMs = 100;
-
-    [Header("Ring‑buffer length (sec)")]
+    [Header("Startup Latency, ms")]
+    [SerializeField] int prefillMs = 0;
+    [Header("Ring length, sec")]
     [SerializeField] int ringLengthSec = 30;
-
     float[] ring;
     int ringSize;
     int readPos;
     int writePos;
     readonly object gate = new object();
-
+    readonly BlockingCollection<string> incoming = new BlockingCollection<string>();
+    readonly ConcurrentQueue<float[]> decoded = new ConcurrentQueue<float[]>();
     AudioClip clip;
     public AudioSource src;
-
-    bool streamActive;
-    bool streamEnded;
+    bool playing;
+    bool draining;
+    static readonly ArrayPool<byte> bytePool = ArrayPool<byte>.Shared;
 
     void Awake()
     {
-        InitNewClip();
+        InitClip();
+        Task.Run(DecodeLoop);
     }
 
-    void InitNewClip()
+    void InitClip()
     {
         ringSize = ringLengthSec * SampleRate;
         ring = new float[ringSize];
@@ -43,38 +44,51 @@ public class StreamingTTSPlayer : MonoBehaviour
 
     public void OnAudioChunk(string b64)
     {
-        if (string.IsNullOrEmpty(b64)) return;
-        byte[] bytes;
-        try { bytes = Convert.FromBase64String(b64); } catch { return; }
-        int count = bytes.Length >> 2;
-        if (count == 0) return;
+        if (!string.IsNullOrEmpty(b64)) incoming.Add(b64);
+    }
 
-        float[] tmp = new float[count];
-        Buffer.BlockCopy(bytes, 0, tmp, 0, bytes.Length);
-
-        lock (gate)
+    void DecodeLoop()
+    {
+        foreach (var b64 in incoming.GetConsumingEnumerable())
         {
-            int free = (readPos + ringSize - writePos - 1) % ringSize;
-            if (count > free) count = free;
-            int tail = ringSize - writePos;
-            if (count <= tail) Array.Copy(tmp, 0, ring, writePos, count);
-            else
+            int expected = (b64.Length >> 2) * 3;
+            byte[] bytes = bytePool.Rent(expected);
+            if (!Convert.TryFromBase64String(b64, bytes, out int written))
             {
-                Array.Copy(tmp, 0, ring, writePos, tail);
-                Array.Copy(tmp, tail, ring, 0, count - tail);
+                bytePool.Return(bytes);
+                continue;
             }
-            writePos = (writePos + count) % ringSize;
-        }
-
-        if (!streamActive && MillisAvailable() >= prefillMs)
-        {
-            src.timeSamples = readPos;
-            src.Play();
-            streamActive = true;
+            int sampleCount = written >> 2;
+            float[] block = new float[sampleCount];
+            Buffer.BlockCopy(bytes, 0, block, 0, written);
+            bytePool.Return(bytes);
+            decoded.Enqueue(block);
         }
     }
 
-    public void EndOfStream() => streamEnded = true;
+    public void EndOfStream()
+    {
+        draining = true;
+    }
+
+    void LateUpdate()
+    {
+        while (decoded.TryDequeue(out var block)) WriteToRing(block);
+        if (!playing && MillisAvailable() >= prefillMs)
+        {
+            src.timeSamples = readPos;
+            src.Play();
+            playing = true;
+        }
+        if (draining && MillisAvailable() == 0 && !src.isPlaying)
+        {
+            src.Stop();
+            playing = false;
+            draining = false;
+            InitClip();
+            SendToFlutter.Send("AudioEnded");
+        }
+    }
 
     void PCMReader(float[] data)
     {
@@ -82,9 +96,10 @@ public class StreamingTTSPlayer : MonoBehaviour
         lock (gate)
         {
             int avail = (writePos - readPos + ringSize) % ringSize;
-            int take = need <= avail ? need : avail;
+            int take = Mathf.Min(need, avail);
             int tail = ringSize - readPos;
-            if (take <= tail) Array.Copy(ring, readPos, data, 0, take);
+            if (take <= tail)
+                Array.Copy(ring, readPos, data, 0, take);
             else
             {
                 Array.Copy(ring, readPos, data, 0, tail);
@@ -95,26 +110,22 @@ public class StreamingTTSPlayer : MonoBehaviour
         }
     }
 
-    void Update()
+    void WriteToRing(float[] src)
     {
-        if (!streamActive) return;
-
-        if (src.isPlaying)
+        int len = src.Length;
+        lock (gate)
         {
-            if (MillisAvailable() < lowWaterMs) src.Pause();
-        }
-        else
-        {
-            if (MillisAvailable() >= prefillMs) src.UnPause();
-        }
-
-        if (streamEnded && MillisAvailable() == 0 && !src.isPlaying)
-        {
-            src.Stop();
-            streamActive = false;
-            streamEnded = false;
-            InitNewClip();
-            SendToFlutter.Send("AudioEnded");
+            int free = (readPos + ringSize - writePos - 1) % ringSize;
+            len = Mathf.Min(len, free);
+            int tail = ringSize - writePos;
+            if (len <= tail)
+                Array.Copy(src, 0, ring, writePos, len);
+            else
+            {
+                Array.Copy(src, 0, ring, writePos, tail);
+                Array.Copy(src, tail, ring, 0, len - tail);
+            }
+            writePos = (writePos + len) % ringSize;
         }
     }
 
@@ -122,5 +133,10 @@ public class StreamingTTSPlayer : MonoBehaviour
     {
         int samples = (writePos - readPos + ringSize) % ringSize;
         return samples * 1000 / SampleRate;
+    }
+
+    void OnDestroy()
+    {
+        incoming.CompleteAdding();
     }
 }
