@@ -21,7 +21,7 @@ public sealed class StreamingTTSPlayer : MonoBehaviour
     [Header("Silence‑timeout, sec")]
     [Tooltip("Сколько секунд подряд буфер должен быть пуст, "
              + "чтобы считать поток оконченным")]
-    [SerializeField] float eosSilenceSec = 0.25f;
+    [SerializeField] float eosSilenceSec = 0.7f;
 
     /* --------‑‑‑ Анимация ----------------------------------------------- */
     [Header("Animator")]

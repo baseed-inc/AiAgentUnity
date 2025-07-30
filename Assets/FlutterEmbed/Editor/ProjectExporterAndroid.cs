@@ -27,9 +27,6 @@ internal class ProjectExporterAndroid : ProjectExporter
         //
         // This needs to be transformed into a single module (the unityLibrary part).
         // The launcher module is not needed, as the user's Flutter project's android part will be the 'launcher'.
-        //
-        // [UPDATE: Unity 6000.0.22 has moved the relevant string from launcher to library. Copy can be ignored]
-        //
         // However, we do need the string.xml file from the launcher, as this contains some strings which Unity
         // will expect to find (and will crash with android.content.res.Resources$NotFoundException if they don't exist)
         // So, first, copy strings.xml 
@@ -41,20 +38,15 @@ internal class ProjectExporterAndroid : ProjectExporter
         string stringResourcesFileToPath = new string[] {exportPath, "unityLibrary", "src", "main", "res", "values", "strings.xml"}
                 .Aggregate((a, b) => Path.Combine(a, b));
 
-        FileInfo stringsResourceFileTo = new FileInfo(stringResourcesFileToPath);
+        FileInfo stringsResourceFile = new FileInfo(stringsResourceFileFromPath);
 
-        // Skip the move if the target exists (6000.0.22 and newer)
-        if (!stringsResourceFileTo.Exists) {
-            FileInfo stringsResourceFileFrom = new FileInfo(stringsResourceFileFromPath);
-
-            if (!stringsResourceFileFrom.Exists) {
-                ProjectExportHelpers.ShowErrorMessage($"Unexpected error: '{stringsResourceFileFrom.FullName} not found");
-                return;
-            }
-
-            stringsResourceFileFrom.MoveTo(stringResourcesFileToPath);
-            Debug.Log($"Moved {stringsResourceFileFromPath} to {stringResourcesFileToPath}");
+        if(!stringsResourceFile.Exists) {
+            ProjectExportHelpers.ShowErrorMessage($"Unexpected error: '{stringsResourceFile.FullName} not found");
+            return;
         }
+
+        stringsResourceFile.MoveTo(stringResourcesFileToPath);
+        Debug.Log($"Moved {stringsResourceFileFromPath} to {stringResourcesFileToPath}");
 
         // The launcher folder can now be deleted
         DirectoryInfo launcherDirectory = new DirectoryInfo(Path.Combine(exportPath, "launcher"));
@@ -95,29 +87,49 @@ internal class ProjectExporterAndroid : ProjectExporter
         }
         string androidManifestContents = File.ReadAllText(androidManifestFile.FullName);
         Regex regexActivityTag = new Regex(@"<activity.*>(\s|\S)+?</activity>", RegexOptions.Multiline);
-        androidManifestContents = regexActivityTag.Replace(androidManifestContents, "");
+        androidManifestContents = regexActivityTag.Replace(androidManifestContents, "<!-- activity block was removed by flutter_embed_unity exporter -->");
         File.WriteAllText(androidManifestFile.FullName, androidManifestContents);
         Debug.Log($"Removed <activity> from {androidManifestFile.FullName}");
 
-        // Update the Unity build.gradle file
+        // Add the namespace 'com.unity3d.player' to unityLibrary\build.gradle
+        // for compatibility with Gradle 8
         FileInfo buildGradleFile = new FileInfo(Path.Combine(exportPath, "build.gradle"));
         if(!buildGradleFile.Exists) {
             ProjectExportHelpers.ShowErrorMessage($"Unexpected error: '{buildGradleFile.FullName} not found");
             return;
         }
         string buildGradleContents = File.ReadAllText(buildGradleFile.FullName);
+        // some unity versions might already include it
+        if(!buildGradleContents.Contains("namespace")) {
+            Regex regexAndroidBlock = new Regex(Regex.Escape("android {"));
+            buildGradleContents = regexAndroidBlock.Replace(buildGradleContents, "android {\n\tnamespace 'com.unity3d.player'  // namespace was added by flutter_embed_unity exporter to support Gradle 8", 1);
+            File.WriteAllText(buildGradleFile.FullName, buildGradleContents);
+            Debug.Log($"Added namespace 'com.unity3d.player' to {buildGradleFile.FullName} for Gradle 8 compatibility");
+        }
+		
+        // (optional) Add the namespace 'com.UnityTechnologies.XR.Manifest' to unityLibrary\xrmanifest.androidlib\build.gradle
+        // for compatibility with Gradle 8
+        FileInfo xrBuildGradleFile = new FileInfo(Path.Combine(exportPath, "xrmanifest.androidlib", "build.gradle"));
+        if(xrBuildGradleFile.Exists) {
+            string xrBuildGradleContents = File.ReadAllText(xrBuildGradleFile.FullName);
+            // some unity versions might already include it
+            if(!xrBuildGradleContents.Contains("namespace")) {
+                Regex regexAndroidBlock = new Regex(Regex.Escape("android {"));
+                xrBuildGradleContents = regexAndroidBlock.Replace(xrBuildGradleContents, "android {\n\tnamespace 'com.UnityTechnologies.XR.Manifest'  // namespace was added by flutter_embed_unity exporter to support Gradle 8", 1);
+                File.WriteAllText(xrBuildGradleFile.FullName, xrBuildGradleContents);
+                Debug.Log($"Added namespace 'com.UnityTechnologies.XR.Manifest' to {xrBuildGradleFile.FullName} for Gradle 8 compatibility");
+            }
+        }
 
-        // UPDATE for Unity 6: we used to add missing namespaces to the unityLibrary\build.gradle and unityLibrary\xrmanifest.androidlib\build.gradle
-        // for compatibility with Gradle 8. Unity 6 now adds these itself.
-
-        // Using project templates created with Flutter 3.29 (Gradle 8 and later) can now cause a build error due to the ndkPath
-        // property in the exported unity project's build.gradle, such as this:
+        // Using project templates created with Flutter 3.29 or later now causes a build error due to an NDK version conflict.
+        // For example:
         //
-        // error: android.ndkVersion is [27.0.12077973] but android.ndkPath /Applications/Unity/Hub/Editor/2022.3.62f1/PlaybackEngines/AndroidPlayer/NDK 
+        // android.ndkVersion is [27.0.12077973] but android.ndkPath /Applications/Unity/Hub/Editor/2022.3.62f1/PlaybackEngines/AndroidPlayer/NDK 
         // refers to a different version [23.1.7779620]
         //
-        // To simplify NDK versioning, the README now states that the user should specify an NDK version in their main app's build.gradle which is equal
-        // to or greater than the one used by Unity. We can then simply remove the hardcoded path to Unity's NDK and allow the user's NDK to take precedence:
+        // To resolve this we now need to remove the explicit reference to NDK 23.1 in unityLibrary\build.gradle, and allow the higher version
+        // used by the Flutter project to take precendence. To do this, remove the line which begins with ndkPath, for example:
+        // ndkPath "/Applications/Unity/Hub/Editor/2022.3.62f1/PlaybackEngines/AndroidPlayer/NDK"  (the exact path will vary)
         Regex regexNDKPath = new Regex(@"^.*ndkPath.*$", RegexOptions.Multiline);
         if (regexNDKPath.IsMatch(buildGradleContents))
         {
@@ -125,21 +137,6 @@ internal class ProjectExporterAndroid : ProjectExporter
             File.WriteAllText(buildGradleFile.FullName, buildGradleContents);
             Debug.Log($"ndkPath property was removed from {buildGradleFile.FullName}");
         }
-        
-
-#if UNITY_6000_0_OR_NEWER
-        // Fix reference to gradle file in the 'shared' directory.
-        buildGradleContents = Regex.Replace(buildGradleContents, @"\.\./shared/", "./shared/");
-        File.WriteAllText(buildGradleFile.FullName, buildGradleContents);
-        Debug.Log($"Fixed ../../shared references in {buildGradleFile.FullName}");
-#else
-        // Add the namespace 'com.unity3d.player' to unityLibrary\build.gradle
-        // for compatibility with Gradle 8
-        Regex regexAndroidBlock = new Regex(Regex.Escape("android {"));
-        buildGradleContents = regexAndroidBlock.Replace(buildGradleContents, "android {\n\tnamespace 'com.unity3d.player'", 1);
-        File.WriteAllText(buildGradleFile.FullName, buildGradleContents);
-        Debug.Log($"Added namespace 'com.unity3d.player' to {buildGradleFile.FullName} for Gradle 8 compatibility");
-#endif
 
         DirectoryInfo burstDebugInformation = new DirectoryInfo(Path.Join(exportPath, "..", "unityLibrary_BurstDebugInformation_DoNotShip"));
         if(burstDebugInformation.Exists) {
