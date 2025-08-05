@@ -71,7 +71,25 @@ public sealed class StreamingTTSPlayer : MonoBehaviour
     public void PlayAnimationState(string stateName)                // ①‑а
     {
         if (animator && !string.IsNullOrEmpty(stateName))
-            animator.Play(stateName, 0, 0f);
+            StartCoroutine(SwitchAnimationCoroutine(stateName));
+    }
+
+    /// <summary>Корутина для корректного переключения анимаций с остановкой предыдущей.</summary>
+    IEnumerator SwitchAnimationCoroutine(string stateName)
+    {
+        // 1. Останавливаем воспроизведение текущей анимации
+        if (animator.enabled)
+        {
+            animator.speed = 0f;                                    // останавливаем анимацию
+        }
+        
+        // 2. Ждём один кадр
+        yield return null;
+        
+        // 3. Восстанавливаем скорость и запускаем новую анимацию
+        animator.Play(stateName, 0, 0f);                           // запускаем новую анимацию
+
+        animator.speed = 1f;                                        // восстанавливаем скорость
     }
 
     /* --------‑‑‑ Фоновое декодирование ----------------------------------- */
