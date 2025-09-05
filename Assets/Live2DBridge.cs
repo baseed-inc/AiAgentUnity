@@ -5,6 +5,9 @@ using System.Threading.Channels;
 using System.Threading.Tasks;
 using UnityEngine;
 using Live2D.CubismMotionSyncPlugin.Framework; // ← нужный namespace для CubismMotionSyncController
+using Live2D.Cubism.Core;                       // ← для CubismModel
+using Live2D.Cubism.Rendering;                  // ← для CubismRenderer
+using Live2D.Cubism.Framework.Raycasting;       // ← для raycast
 
 public sealed class StreamingTTSPlayer : MonoBehaviour
 {
@@ -30,7 +33,15 @@ public sealed class StreamingTTSPlayer : MonoBehaviour
     [Header("Live2D Motion Sync")]
     public CubismMotionSyncController motionSync;                    // ②
 
+    [Header("Live2D Model")]
+    public CubismModel cubismModel;                                  // ③
+    
+    [Header("Live2D Clickable Renderer")]
+    public CubismRenderer clickableRenderer;                         // ③‑а
+
     /* --------‑‑‑ внутреннее состояние ----------------------------------- */
+    CubismRaycaster raycaster;                                       // ④
+    CubismRaycastHit[] raycastResults;
     float[] ring;
     int     ringSize, readPos, writePos;
     readonly object gate = new object();
@@ -51,6 +62,12 @@ public sealed class StreamingTTSPlayer : MonoBehaviour
         _ = Task.Run(DecodeLoop);
 
         if (motionSync) motionSync.enabled = false;                 // ②‑а
+
+        // Инициализация raycast системы
+        InitializeRaycast();                                        // ④‑а
+
+        // Запускаем проверку готовности модели
+        StartCoroutine(CheckModelReady());                          // ⑤
     }
 
     void OnDestroy() => inChannel.Writer.TryComplete();
@@ -93,6 +110,15 @@ public sealed class StreamingTTSPlayer : MonoBehaviour
     }
 
     /* --------‑‑‑ Update‑цикл -------------------------------------------- */
+    void Update()
+    {
+        // Обнаружение кликов по Live2D модели                     // ④‑б
+        if (Input.GetMouseButtonDown(0))
+        {
+            HandleClick();
+        }
+    }
+
     void LateUpdate()
     {
         /* 1) старт плеера, когда предзаполнен буфер */
@@ -208,4 +234,68 @@ public sealed class StreamingTTSPlayer : MonoBehaviour
     }
 
     int SamplesAvailable() => (writePos - readPos + ringSize) % ringSize;
+
+    /* --------‑‑‑ Raycast методы ----------------------------------------- */
+    void InitializeRaycast()                                         // ④‑в
+    {
+        if (cubismModel == null)
+        {
+            Debug.LogWarning("CubismModel не назначен в StreamingTTSPlayer. Raycast не будет работать.");
+            return;
+        }
+
+        if (clickableRenderer == null)
+        {
+            Debug.LogWarning("ClickableRenderer не назначен в StreamingTTSPlayer. Raycast не будет работать.");
+            return;
+        }
+
+        // Получаем или добавляем CubismRaycaster к объекту с CubismModel
+        raycaster = cubismModel.GetComponent<CubismRaycaster>();
+        if (raycaster == null)
+        {
+            raycaster = cubismModel.gameObject.AddComponent<CubismRaycaster>();
+        }
+
+        // Инициализируем буфер для результатов raycast
+        raycastResults = new CubismRaycastHit[4];
+
+        // Добавляем CubismRaycastable только к указанному рендереру
+        var raycastable = clickableRenderer.GetComponent<CubismRaycastable>();
+        if (raycastable == null)
+        {
+            raycastable = clickableRenderer.gameObject.AddComponent<CubismRaycastable>();
+            raycastable.Precision = CubismRaycastablePrecision.BoundingBox;
+        }
+
+        Debug.Log($"Raycast инициализирован для рендерера: {clickableRenderer.name}");
+    }
+
+    void HandleClick()                                               // ④‑г
+    {
+        if (raycaster == null) return;
+
+        // Создаем луч из позиции мыши
+        var ray = Camera.main.ScreenPointToRay(Input.mousePosition);
+        var hitCount = raycaster.Raycast(ray, raycastResults);
+
+        // Проверяем попадания
+        if (hitCount > 0)
+        {
+            Debug.Log("heart_clicked - Live2D модель была кликнута!");
+            SendToFlutter.Send("heart_clicked");
+        }
+    }
+
+    /* --------‑‑‑ Проверка готовности модели ----------------------------- */
+    IEnumerator CheckModelReady()                                    // ⑤‑а
+    {
+        // Простое ожидание - несколько кадров после инициализации
+        yield return new WaitForEndOfFrame();
+        yield return new WaitForEndOfFrame(); 
+        yield return new WaitForEndOfFrame();
+
+        Debug.Log("Live2D модель готова!");
+        SendToFlutter.Send("model_loaded");
+    }
 }
