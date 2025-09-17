@@ -39,6 +39,9 @@ public sealed class StreamingTTSPlayer : MonoBehaviour
     [Header("Live2D Clickable Renderer")]
     public CubismRenderer clickableRenderer;                         // ③‑а
 
+    [Header("Sleep Audio")]
+    public AudioClip sleepAudioClip;                                 // ⑥
+
     /* --------‑‑‑ внутреннее состояние ----------------------------------- */
     CubismRaycaster raycaster;                                       // ④
     CubismRaycastHit[] raycastResults;
@@ -87,7 +90,17 @@ public sealed class StreamingTTSPlayer : MonoBehaviour
     /// <summary>Вызов анимационного стейта по имени (доступно из Flutter).</summary>
     public void PlayAnimationState(string stateName)                // ①‑а
     {
-        if (animator && !string.IsNullOrEmpty(stateName))
+        if (string.IsNullOrEmpty(stateName)) return;
+
+        // Специальная обработка для Sleep
+        if (stateName.Equals("Sleep", System.StringComparison.OrdinalIgnoreCase))
+        {
+            StartCoroutine(SleepEmotionSequence());
+            return;
+        }
+
+        // Обычная обработка для других анимаций
+        if (animator)
             animator.Play(stateName, 0, 0f);
     }
 
@@ -169,6 +182,44 @@ public sealed class StreamingTTSPlayer : MonoBehaviour
             if (!playing)                                           // проверяем еще раз
                 PlayAnimationState("Idle");                        // второе переключение
         }
+    }
+
+    /* --------‑‑‑ Корутина для последовательности Sleep ------------------- */
+    IEnumerator SleepEmotionSequence()                               // ⑥‑б
+    {
+        // Сохраняем оригинальный клип и настройки
+        var originalClip = src.clip;
+        var originalLoop = src.loop;
+        
+        // 1. Запускаем анимацию Dejected
+        if (animator) animator.Play("Dejected", 0, 0f);
+        
+        // 2. Ждем 0.5 секунды
+        yield return new WaitForSeconds(0.5f);
+        
+        // 3. Запускаем аудио клип и включаем motion sync
+        if (sleepAudioClip != null && src != null)
+        {
+            src.Stop(); // останавливаем текущий звук если играет
+            src.clip = sleepAudioClip;
+            src.loop = false; // фиксированный клип не должен зацикливаться
+            src.Play();
+            
+            // Включаем motion sync на время проигрывания клипа
+            if (motionSync) motionSync.enabled = true;
+        }
+        
+        // 4. Ждем 7.2 секунды (общее время с начала)
+        yield return new WaitForSeconds(6.7f); // 7.2 - 0.5 = 6.7
+        
+        // 5. Восстанавливаем оригинальные настройки аудио
+        src.Stop();
+        src.clip = originalClip;
+        src.loop = originalLoop;
+        
+        // 6. Выключаем motion sync и включаем анимацию Sleep
+        if (motionSync) motionSync.enabled = false;
+        if (animator) animator.Play("Sleep", 0, 0f);
     }
 
     /* --------‑‑‑ PCM Reader --------------------------------------------- */
